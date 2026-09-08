@@ -70,7 +70,7 @@ commits for the individual Phase 1 items.
 | Electron main process | COMPLETE | `src/main/index.js` + `appController.js`; app boots, initializes, quits cleanly |
 | preload / context isolation | COMPLETE | `contextIsolation: true`, `nodeIntegration: false`, `contextBridge` surface matches the registered IPC channels |
 | renderer / UI | PARTIAL | Pairing view renders and is wired; main dashboard/settings view has never been reached (requires a paired worker) so it is unverified. Session table renders whatever `listSessions()` returns |
-| configuration management | PARTIAL | `ConfigManager` works, but the AppData path is hardcoded (`os.homedir()/AppData/Roaming`) rather than `app.getPath("userData")`, and the legacy `.env` config path (`src/config.js`) still coexists. `autoStart` and `minimizeToTray` are persisted but not acted on anywhere |
+| configuration management | COMPLETE | `ConfigManager` owns one frozen `DEFAULT_CONFIG`, resolves `%APPDATA%/MANKO Worker` through Electron, writes atomically, and strips secret-like keys from `config.json`/`session.json`. See §5b. `autoStart` and `minimizeToTray` are persisted but still not acted on anywhere (later-phase UI/OS integration) |
 | Credential Manager / keytar | PARTIAL | `CredentialStore` implements store/get/delete/find against keytar; never exercised end to end because pairing never completes. Unverifiable on Linux (no secret service) |
 | pairing | PARTIAL | UI + IPC + polling loop exist, but: the Base44 pairing contract is explicitly marked unknown in `pairingManager.js`; in pairing mode `base44Client` is only constructed when `config.base44ApiUrl` is already set (it is `null` by default), so `submitPairingCode` would fail on a null client; `requestPairing()` is never called by any UI path; and signing a pairing request needs a shared secret the worker does not yet have |
 | worker identity | PARTIAL | `workerId` comes from stored credentials/config. `appController` emits `worker_id: config.worker_id` for the WORKER_ONLINE event, but the config key is `workerId`, so that field is `undefined` |
@@ -85,9 +85,9 @@ commits for the individual Phase 1 items.
 | crash recovery | COMPLETE (code) / UNKNOWN (runtime) | Bounded attempts with `[5s, 15s, 30s]` backoff, terminal `error` state, no infinite loop |
 | reconnect / offline behavior | PARTIAL | `reconnect` command reattaches to a live context; heartbeat failures are counted and reported at 3 consecutive misses, but there is no offline queue, no re-registration after the control plane returns, and no worker-level online/offline state machine |
 | security / HMAC | COMPLETE (verified) | `signBody`/`verifyBody` base64url unpadded, constant-time compare, 4xx not retried, logger redacts secret-like keys. `npm run verify` passes |
-| logging | COMPLETE | Daily file + console, key redaction. `logLevel` from config is not honored (all levels always written) |
+| logging | COMPLETE | Daily file + console, key redaction, `logLevel` from config honored (`debug`/`info`/`warn`/`error`) |
 | Windows packaging | NOT STARTED | electron-builder config exists (nsis, x64) but has never been run. `build/icon.ico` referenced by `build`, `nsis`, and the BrowserWindow is **absent from the repo** (only `build/.gitkeep`). `extraResources` expects `node_modules/playwright-core/.local-browsers/chromium-*/chrome-win`, and nothing installs that browser (no postinstall) |
-| tests | PARTIAL | `tests/credentialStore.test.js` (18 Jest tests, keytar mocked) covers Phase 2 only. No tests for any other component. `scripts/verify-signing.js` plus two throwaway Electron smoke files (`test-electron.js`, `test-simple.js`) at the repo root |
+| tests | PARTIAL | `tests/credentialStore.test.js` (18 Jest tests, keytar mocked) and `tests/configManager.test.js` (19 tests) cover Phases 2 and 3. No tests for any other component. `scripts/verify-signing.js` plus two throwaway Electron smoke files (`test-electron.js`, `test-simple.js`) at the repo root |
 
 ## 5. Phase status
 
@@ -95,7 +95,7 @@ commits for the individual Phase 1 items.
 | --- | --- | --- |
 | 1 — Foundation | COMPLETE | Repo unpacked, deps install, `npm run verify` passes, `npm start` opens the pairing window |
 | 2 — Credential Storage | COMPLETE (behavior verified against mocked keytar; Windows Credential Manager persistence still requires Windows verification) | See §5a |
-| 3 — Configuration Refactor | PARTIAL | AppData config manager exists; hardcoded path, dead legacy `.env` config, unhonored settings |
+| 3 — Configuration Refactor | COMPLETE | Single source of truth for non-secret runtime config under `%APPDATA%/MANKO Worker`; secrets stay in keytar. See §5b |
 | 4 — Pairing | PARTIAL | UI/flow scaffolded; Base44 contract unknown, null-client bug, request-code path missing |
 | 5 — Command Registry | COMPLETE (code) | Registry + validators + dispatch; runtime unverified |
 | 6 — Session Manager | PARTIAL | Lifecycle complete; no session assignment path, `revokeSession` bug |
@@ -105,7 +105,7 @@ commits for the individual Phase 1 items.
 | 10 — Error Recovery | PARTIAL | Browser crash recovery implemented; control-plane offline behavior thin |
 | 11 — Security Hardening | PARTIAL | HMAC verified; no rate limiting, no request-timestamp/replay window, idempotency cache is memory-only |
 | 12 — Windows Packaging | NOT STARTED | Never built; icon and bundled Chromium missing |
-| 13 — Testing | PARTIAL | Jest suite exists but covers Phase 2 credential storage only |
+| 13 — Testing | PARTIAL | Jest suite covers Phase 2 credential storage and Phase 3 configuration only |
 | 14 — Documentation | PARTIAL | README describes the legacy POC (`npm start` as a Node worker, `.env` config), not the current Electron app |
 | 15 — Release | NOT STARTED | — |
 
@@ -135,6 +135,61 @@ No plaintext or Linux fallback was added.
   settings stay in `configManager` (the wider Phase 3 refactor was not done).
 - Security boundary unchanged: this store holds only MANKO Worker control-plane pairing
   secrets — never target-site passwords, cookies, or browser tokens.
+
+### 5b. Phase 3 — Configuration Refactor (implemented)
+
+One source of truth for non-secret runtime configuration: `DEFAULT_CONFIG` in
+`src/main/configManager.js`, frozen and exported. Modules read their values from the
+config object they are given and fall back to `DEFAULT_CONFIG` only when constructed
+without one.
+
+Layout (created on first load):
+
+```
+%APPDATA%/MANKO Worker/config.json                      non-secret runtime settings
+%APPDATA%/MANKO Worker/sessions/{session_id}/session.json  per-session settings
+%APPDATA%/MANKO Worker/sessions/{session_id}/chromium-profile/
+%APPDATA%/MANKO Worker/logs/
+```
+
+The directory is resolved via Electron's `app.getPath("appData")` (so it is exactly
+`%APPDATA%/MANKO Worker` on the Windows target), falling back to `%APPDATA%` and then to
+`~/AppData/Roaming` outside Electron. Tests inject their own path.
+
+Behavior:
+
+- Missing `config.json`: defaults are written out on first load.
+- Existing `config.json`: merged over the defaults, so new keys appear on upgrade.
+- Malformed or non-object `config.json`: falls back to defaults, logs
+  `config_load_failed` with the parser message only — never the file contents.
+- Persistence is write-temp-then-rename, so a crash mid-write cannot truncate the file.
+- `updateConfig`/`set` persist immediately; a new `ConfigManager` reads the same values
+  back after restart.
+
+Security boundary (unchanged from Phase 2, now enforced by construction):
+
+- Keys matching `/secret|password|token|cookie|authorization|credential/i` are stripped
+  on load, on save, and on session save, and `set()` throws for them. A secret cannot
+  reach `config.json` or `session.json` even if a caller passes one.
+- Pairing secrets exist only in the in-memory runtime view built by
+  `buildRuntimeConfig({ workerId, workerSharedSecret, base44ApiBaseUrl })`, whose
+  secret fields come from `CredentialStore`/keytar and are never written back.
+
+Values centralized out of the modules (defaults unchanged in every case):
+`crashRecoveryBackoffMs` (was a constant in `sessionManager.js`), `apiRetryBackoffMs` and
+`ackRetryBackoffMs` (were literals in `base44Client.js`), `pairingPollIntervalMs`,
+`pairingPollTimeoutMs` and `pairingRetryBackoffMs` (were literals in `pairingManager.js`),
+`viewportWidth`/`viewportHeight` (were a literal in `browserManager.js`). Existing
+`maxSessions`, endpoint host/port, heartbeat interval, ACK delay, navigation timeout and
+crash limits keep their previous values.
+
+Legacy POC (`src/config.js`, `src/worker.js`, and siblings): still not referenced by the
+Electron entry point, left in place, and **not** part of the runtime configuration
+system. It carries its own `.env`-driven hardcoded values — worker id `worker-01`,
+`maxSessions: 1`, `crashMaxRecoveryAttempts: 2`, a session id of `6a97b86f`, and a target
+URL default of `https://sportpesa.co.tz/en/casino/aviator` — that contradict the Electron
+defaults. Do not copy them into `config.json`; they belong to the standalone POC only.
+The root `.env.example` likewise documents the POC, not the Electron app.
 
 ## 6. Known limitations and blockers
 
@@ -184,13 +239,37 @@ operation, and absence of secret leakage in logs, thrown errors, and stored back
 Not exercised: pairing round trip, command endpoint, heartbeat delivery, browser
 launch, crash recovery, installer build.
 
+Phase 3:
+
+```
+npm test                                 # PASS: 2 suites, 37 tests
+                                         #   tests/configManager.test.js  19 (new)
+                                         #   tests/credentialStore.test.js 18 (Phase 2, unchanged)
+npm run verify                           # PASS
+DISPLAY=:0 npm start                     # boots to pairing mode; writes the default
+                                         # config.json under the app data directory
+```
+
+Configuration coverage: directory/layout creation, defaults, first-run file creation,
+merge over defaults, lazy load, updates and `set`, persistence across a fresh
+`ConfigManager` (restart), no leftover temp file, session config save/load/delete/list,
+malformed and non-object `config.json`, missing and malformed `session.json`, secret-key
+detection, refusal to persist secrets via `updateConfig`/`set`, stripping a secret already
+present in `config.json`, secret-free `session.json`, runtime-only secrets from
+`buildRuntimeConfig`, and absence of secret values in warning logs.
+
+Not verified on this machine: `%APPDATA%` resolution itself (Linux Electron resolves
+`app.getPath("appData")` to `~/.config`) and rename-based atomic writes on NTFS — both
+require a Windows run.
+
 ## 8. Checkpoint
 
-- **CURRENT CHECKPOINT:** Phase 2 (Credential Storage) COMPLETE, verified against mocked
+- **CURRENT CHECKPOINT:** Phase 3 (Configuration Refactor) COMPLETE. Phase 1 (Foundation)
+  COMPLETE and verified. Phase 2 (Credential Storage) COMPLETE, verified against mocked
   keytar; Windows Credential Manager persistence still requires verification on Windows.
-  Phase 1 (Foundation) COMPLETE and verified. Phases 3–11 exist as unverified scaffolding
-  of varying depth; Phases 12 and 15 not started, 13 partial (Phase 2 tests only).
-- **NEXT AUTHORIZED PHASE:** Phase 3 — Configuration Refactor.
+  Phases 4–11 exist as unverified scaffolding of varying depth; Phases 12 and 15 not
+  started, 13 partial (Phase 2 + Phase 3 tests only).
+- **NEXT AUTHORIZED PHASE:** Phase 4 — Pairing.
 
 ## 9. Rules for future sessions
 
@@ -198,6 +277,9 @@ launch, crash recovery, installer build.
   or redo the Electron bootstrap.
 - Phase 2 is done. Do **not** rewrite `credentialStore.js`, add a second credential
   store, or introduce a non-keytar backend.
+- Phase 3 is done. Add new non-secret runtime settings to `DEFAULT_CONFIG` in
+  `configManager.js` rather than hardcoding them in a module, and never route a secret
+  through `config.json`/`session.json`.
 - Do not refactor working code for style. Do not start a later phase before the
   current one is authorized.
 - The target runtime is Windows Electron. Do not replace Windows-specific

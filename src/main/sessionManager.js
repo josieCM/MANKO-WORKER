@@ -3,7 +3,7 @@
 const { BrowserManager } = require("./browserManager");
 const { Heartbeat } = require("./heartbeat");
 
-const CRASH_RECOVERY_BACKOFF_MS = [5000, 15000, 30000];
+const { DEFAULT_CONFIG } = require("./configManager");
 
 class SessionManager {
   constructor(cfg, logger, base44, events, configManager) {
@@ -425,8 +425,8 @@ class SessionManager {
     this.logger.error("browser_crashed", { session: sessionId });
 
     while (rec.crashRecoveryAttempts < this.cfg.crashMaxRecoveryAttempts) {
-      const backoff =
-        CRASH_RECOVERY_BACKOFF_MS[Math.min(rec.crashRecoveryAttempts, CRASH_RECOVERY_BACKOFF_MS.length - 1)];
+      const schedule = this.cfg.crashRecoveryBackoffMs || DEFAULT_CONFIG.crashRecoveryBackoffMs;
+      const backoff = schedule[Math.min(rec.crashRecoveryAttempts, schedule.length - 1)];
       this.logger.warn("crash_recovery_scheduled", {
         session: sessionId,
         attempt: rec.crashRecoveryAttempts + 1,

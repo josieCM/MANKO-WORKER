@@ -1,6 +1,7 @@
 "use strict";
 
 const crypto = require("crypto");
+const { DEFAULT_CONFIG } = require("./configManager");
 
 // Canonical signing rules (per base44/shared/WORKER_CONTRACT.md):
 //   X-Worker-Signature: base64url(HMAC_SHA256(rawBody, WORKER_SHARED_SECRET))
@@ -33,7 +34,7 @@ class Base44Client {
 
   async post(functionName, payload, options) {
     const opts = options || {};
-    const retries = opts.retries || [1000, 2000, 5000];
+    const retries = opts.retries || this.cfg.apiRetryBackoffMs || DEFAULT_CONFIG.apiRetryBackoffMs;
     const body = JSON.stringify(payload);
     const signature = signBody(this.cfg.workerSharedSecret, body);
     const url = `${this.cfg.base44ApiBaseUrl}/functions/${functionName}`;
@@ -90,7 +91,9 @@ class Base44Client {
   }
 
   sendCommandAck(payload) {
-    return this.post("ingestCommandAck", payload, { retries: [2000, 5000, 10000] });
+    return this.post("ingestCommandAck", payload, {
+      retries: this.cfg.ackRetryBackoffMs || DEFAULT_CONFIG.ackRetryBackoffMs,
+    });
   }
 }
 

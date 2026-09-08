@@ -1,12 +1,16 @@
 "use strict";
 
+const { DEFAULT_CONFIG } = require("./configManager");
+
 class PairingManager {
-  constructor(base44Client, logger) {
+  constructor(base44Client, logger, cfg) {
     this.base44Client = base44Client;
     this.logger = logger;
+    this.cfg = cfg || DEFAULT_CONFIG;
     this.pollingInterval = null;
-    this.pollingDelayMs = 5000;
-    this.maxPollingDurationMs = 5 * 60 * 1000; // 5 minutes
+    this.pollingDelayMs = this.cfg.pairingPollIntervalMs || DEFAULT_CONFIG.pairingPollIntervalMs;
+    this.maxPollingDurationMs = this.cfg.pairingPollTimeoutMs || DEFAULT_CONFIG.pairingPollTimeoutMs;
+    this.retryBackoffMs = this.cfg.pairingRetryBackoffMs || DEFAULT_CONFIG.pairingRetryBackoffMs;
   }
 
   async startPolling(pairingCode, onCredentialsReceived, onError) {
@@ -67,7 +71,7 @@ class PairingManager {
     // This will need to be updated to the actual Base44 function name
     // For now, we'll assume it's workerPairingPoll
     const response = await this.base44Client.post("workerPairingPoll", payload, {
-      retries: [2000, 5000],
+      retries: this.retryBackoffMs,
     });
 
     return response;
@@ -83,7 +87,7 @@ class PairingManager {
     // }
 
     const response = await this.base44Client.post("requestWorkerPairing", {}, {
-      retries: [2000, 5000],
+      retries: this.retryBackoffMs,
     });
 
     return response;
