@@ -6,6 +6,9 @@ const path = require("path");
 // Never write these key names' values to logs.
 const REDACT_KEY_RE = /secret|password|token|cookie|authorization|credential/i;
 
+const LEVELS = { debug: 10, info: 20, warn: 30, error: 40 };
+const DEFAULT_LEVEL = "info";
+
 function serializeValue(v) {
   if (v === undefined || v === null) return "";
   if (typeof v === "object") {
@@ -15,9 +18,14 @@ function serializeValue(v) {
 }
 
 class Logger {
-  constructor(logDir) {
+  constructor(logDir, level) {
     this.logDir = logDir;
     this.currentFile = null;
+    this.setLevel(level);
+  }
+
+  setLevel(level) {
+    this.level = LEVELS[level] ? level : DEFAULT_LEVEL;
   }
 
   _filePath() {
@@ -36,6 +44,7 @@ class Logger {
   }
 
   log(level, event, fields) {
+    if ((LEVELS[level] || LEVELS[DEFAULT_LEVEL]) < LEVELS[this.level]) return;
     const ts = new Date().toISOString();
     const clean = this._clean(fields);
     const kv = Object.entries(clean)
@@ -50,9 +59,10 @@ class Logger {
     }
   }
 
+  debug(event, fields) { this.log("debug", event, fields); }
   info(event, fields) { this.log("info", event, fields); }
   warn(event, fields) { this.log("warn", event, fields); }
   error(event, fields) { this.log("error", event, fields); }
 }
 
-module.exports = { Logger };
+module.exports = { Logger, LEVELS };

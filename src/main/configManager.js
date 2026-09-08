@@ -4,13 +4,88 @@ const fs = require("fs");
 const path = require("path");
 const os = require("os");
 
+const APP_DIR_NAME = "MANKO Worker";
+
+// Single source of truth for non-secret runtime configuration. Every module
+// reads these values from the loaded config object rather than hardcoding them.
+const DEFAULT_CONFIG = Object.freeze({
+  // identity / pairing metadata (the secret itself lives in CredentialStore)
+  workerId: null,
+  base44ApiUrl: null,
+  lastSeenAt: null,
+  // desktop behavior
+  autoStart: false,
+  minimizeToTray: true,
+  logLevel: "info",
+  // worker runtime
+  maxSessions: 5,
+  commandEndpointHost: "127.0.0.1",
+  commandEndpointPort: 3939,
+  heartbeatIntervalMs: 10000,
+  ackDelayMs: 2500,
+  navigationTimeoutMs: 45000,
+  crashMaxRecoveryAttempts: 3,
+  crashMaxBackoffMs: 60000,
+  crashRecoveryBackoffMs: Object.freeze([5000, 15000, 30000]),
+  apiRetryBackoffMs: Object.freeze([1000, 2000, 5000]),
+  ackRetryBackoffMs: Object.freeze([2000, 5000, 10000]),
+  pairingRetryBackoffMs: Object.freeze([2000, 5000]),
+  pairingPollIntervalMs: 5000,
+  pairingPollTimeoutMs: 300000,
+  headless: false,
+  viewportWidth: 1280,
+  viewportHeight: 800,
+  version: "1.0.0-alpha",
+});
+
+// config.json and session.json are plaintext files: nothing matching these key
+// names may ever be persisted there. Secrets belong in CredentialStore/keytar.
+const SECRET_KEY_RE = /secret|password|token|cookie|authorization|credential/i;
+
+function isSecretKey(key) {
+  return SECRET_KEY_RE.test(String(key));
+}
+
+function stripSecrets(obj) {
+  const out = {};
+  for (const [key, value] of Object.entries(obj || {})) {
+    if (!isSecretKey(key)) out[key] = value;
+  }
+  return out;
+}
+
+// %APPDATA%/MANKO Worker on Windows; the Electron-provided per-user data
+// directory elsewhere, so the app also runs outside Windows for development.
+function resolveAppDataPath() {
+  try {
+    const { app } = require("electron");
+    if (app && typeof app.getPath === "function") {
+      return path.join(app.getPath("appData"), APP_DIR_NAME);
+    }
+  } catch (_) {
+    /* not running inside Electron (tests, scripts) */
+  }
+  if (process.env.APPDATA) return path.join(process.env.APPDATA, APP_DIR_NAME);
+  return path.join(os.homedir(), "AppData", "Roaming", APP_DIR_NAME);
+}
+
 class ConfigManager {
-  constructor() {
-    this.appDataPath = path.join(os.homedir(), "AppData", "Roaming", "MANKO Worker");
+  constructor(options) {
+    const opts = options || {};
+    this.appDataPath = opts.appDataPath || resolveAppDataPath();
     this.configPath = path.join(this.appDataPath, "config.json");
     this.sessionsPath = path.join(this.appDataPath, "sessions");
     this.logsPath = path.join(this.appDataPath, "logs");
+    this.logger = opts.logger || null;
     this.config = null;
+  }
+
+  _warn(event, message) {
+    if (this.logger && typeof this.logger.warn === "function") {
+      this.logger.warn(event, { error: message });
+    } else {
+      console.error(`${event}: ${message}`);
+    }
   }
 
   ensureDirectories() {
@@ -19,39 +94,30 @@ class ConfigManager {
     fs.mkdirSync(this.logsPath, { recursive: true });
   }
 
+  getDefaults() {
+    return { ...DEFAULT_CONFIG };
+  }
+
   loadConfig() {
     this.ensureDirectories();
-
-    const defaults = {
-      workerId: null,
-      base44ApiUrl: null,
-      pairedAt: null,
-      lastSeenAt: null,
-      autoStart: false,
-      minimizeToTray: true,
-      logLevel: "info",
-      maxSessions: 5,
-      commandEndpointHost: "127.0.0.1",
-      commandEndpointPort: 3939,
-      heartbeatIntervalMs: 10000,
-      ackDelayMs: 2500,
-      navigationTimeoutMs: 45000,
-      crashMaxRecoveryAttempts: 3,
-      crashMaxBackoffMs: 60000,
-      headless: false,
-      version: "1.0.0-alpha",
-    };
 
     if (fs.existsSync(this.configPath)) {
       try {
         const data = fs.readFileSync(this.configPath, "utf8");
-        this.config = { ...defaults, ...JSON.parse(data) };
+        const parsed = JSON.parse(data);
+        if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+          throw new Error("config.json is not an object");
+        }
+        // Anything secret-looking that reached the file is dropped rather than
+        // carried into the runtime.
+        this.config = { ...DEFAULT_CONFIG, ...stripSecrets(parsed) };
       } catch (err) {
-        console.error("Failed to load config, using defaults:", err.message);
-        this.config = { ...defaults };
+        // Never echo file contents: a malformed config may contain anything.
+        this._warn("config_load_failed", err.message);
+        this.config = { ...DEFAULT_CONFIG };
       }
     } else {
-      this.config = { ...defaults };
+      this.config = { ...DEFAULT_CONFIG };
       this.saveConfig();
     }
 
@@ -60,21 +126,39 @@ class ConfigManager {
 
   saveConfig() {
     this.ensureDirectories();
-    fs.writeFileSync(this.configPath, JSON.stringify(this.config, null, 2));
+    const safe = stripSecrets(this.config || DEFAULT_CONFIG);
+    // Write-then-rename so a crash mid-write cannot leave a truncated file.
+    const tmpPath = `${this.configPath}.tmp`;
+    fs.writeFileSync(tmpPath, JSON.stringify(safe, null, 2));
+    fs.renameSync(tmpPath, this.configPath);
   }
 
   updateConfig(updates) {
-    this.config = { ...this.config, ...updates };
+    this.config = { ...(this.config || DEFAULT_CONFIG), ...stripSecrets(updates) };
     this.saveConfig();
+    return this.config;
   }
 
   get(key) {
+    if (!this.config) this.loadConfig();
     return this.config[key];
   }
 
   set(key, value) {
+    if (isSecretKey(key)) {
+      throw new Error(`Refusing to persist secret-like key "${key}" to config.json`);
+    }
+    if (!this.config) this.loadConfig();
     this.config[key] = value;
     this.saveConfig();
+  }
+
+  // Runtime view handed to the worker modules: persisted non-secret settings
+  // plus the pairing secrets held in memory only. Mutating it never touches
+  // config.json, which keeps secrets out of the file by construction.
+  buildRuntimeConfig(secrets) {
+    const base = this.config || this.loadConfig();
+    return { ...base, ...(secrets || {}) };
   }
 
   getSessionPath(sessionId) {
@@ -96,7 +180,7 @@ class ConfigManager {
         const data = fs.readFileSync(sessionPath, "utf8");
         return JSON.parse(data);
       } catch (err) {
-        console.error("Failed to load session config:", err.message);
+        this._warn("session_config_load_failed", err.message);
         return null;
       }
     }
@@ -106,7 +190,12 @@ class ConfigManager {
   saveSessionConfig(sessionId, config) {
     const sessionPath = this.getSessionPath(sessionId);
     fs.mkdirSync(sessionPath, { recursive: true });
-    fs.writeFileSync(this.getSessionConfigPath(sessionId), JSON.stringify(config, null, 2));
+    const safe = stripSecrets(config);
+    const target = this.getSessionConfigPath(sessionId);
+    const tmpPath = `${target}.tmp`;
+    fs.writeFileSync(tmpPath, JSON.stringify(safe, null, 2));
+    fs.renameSync(tmpPath, target);
+    return safe;
   }
 
   deleteSession(sessionId) {
@@ -135,4 +224,11 @@ class ConfigManager {
   }
 }
 
-module.exports = { ConfigManager };
+module.exports = {
+  ConfigManager,
+  DEFAULT_CONFIG,
+  APP_DIR_NAME,
+  isSecretKey,
+  stripSecrets,
+  resolveAppDataPath,
+};

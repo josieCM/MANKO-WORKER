@@ -2,6 +2,7 @@
 
 const path = require("path");
 const { chromium } = require("playwright");
+const { DEFAULT_CONFIG } = require("./configManager");
 
 // Observable-only authentication heuristics. No bypassing, no automation of
 // login - the operator authenticates manually in the visible browser window.
@@ -29,7 +30,10 @@ class BrowserManager {
     this.logger.info("browser_launching", { session: sessionId, profile: profilePath });
     this.context = await chromium.launchPersistentContext(profilePath, {
       headless: this.cfg.headless,
-      viewport: { width: 1280, height: 800 },
+      viewport: {
+        width: this.cfg.viewportWidth || DEFAULT_CONFIG.viewportWidth,
+        height: this.cfg.viewportHeight || DEFAULT_CONFIG.viewportHeight,
+      },
     });
     this.context.on("close", () => {
       if (!this.intentionalClose) {

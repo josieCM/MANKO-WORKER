@@ -29,6 +29,9 @@ class AppController {
     this.isPaired = false;
     this.workerId = null;
     this.workerStatus = "PAIRING";
+    // Runtime view of the configuration (persisted settings + in-memory
+    // secrets). Never written back to config.json.
+    this.runtimeConfig = null;
   }
 
   async initialize() {
@@ -36,7 +39,8 @@ class AppController {
     const config = this.configManager.loadConfig();
     
     // Initialize logger
-    this.logger = new Logger(this.configManager.getLogsPath());
+    this.logger = new Logger(this.configManager.getLogsPath(), config.logLevel);
+    this.configManager.logger = this.logger;
     this.credentialStore.logger = this.logger;
     this.logger.info("app_initializing", { version: config.version });
 
@@ -74,45 +78,51 @@ class AppController {
       throw new Error("Credentials not found despite paired status");
     }
 
-    // Update config with credential data
-    config.workerId = credentials.worker_id;
-    config.workerSharedSecret = credentials.worker_shared_secret;
-    config.base44ApiBaseUrl = credentials.base44_api_url;
+    // Runtime config: persisted non-secret settings plus the pairing secrets,
+    // which stay in memory only.
+    const runtime = this.configManager.buildRuntimeConfig({
+      workerId: credentials.worker_id,
+      workerSharedSecret: credentials.worker_shared_secret,
+      base44ApiBaseUrl: credentials.base44_api_url,
+    });
+    this.runtimeConfig = runtime;
 
     // Initialize Base44 client
-    this.base44Client = new Base44Client(config, this.logger);
+    this.base44Client = new Base44Client(runtime, this.logger);
 
     // Initialize event reporter
-    this.events = new EventReporter(config, this.base44Client, this.logger);
+    this.events = new EventReporter(runtime, this.base44Client, this.logger);
 
     // Initialize session manager
-    this.sessionManager = new SessionManager(config, this.logger, this.base44Client, this.events, this.configManager);
+    this.sessionManager = new SessionManager(runtime, this.logger, this.base44Client, this.events, this.configManager);
 
     // Initialize command handler
-    this.commandHandler = new CommandHandler(config, this.logger, this.base44Client, this.events, this.sessionManager);
+    this.commandHandler = new CommandHandler(runtime, this.logger, this.base44Client, this.events, this.sessionManager);
 
     // Initialize command receiver
-    this.commandReceiver = new CommandReceiver(config, this.logger, this.commandHandler);
+    this.commandReceiver = new CommandReceiver(runtime, this.logger, this.commandHandler);
     await this.commandReceiver.start();
 
     // Send worker online event
     await this.events.sessionEvent("worker", "WORKER_ONLINE", {
       message: "Worker online",
-      metadata: { worker_id: config.worker_id },
+      metadata: { worker_id: runtime.workerId },
     }).catch(() => {});
 
-    this.logger.info("worker_online", { worker_id: config.worker_id });
+    this.logger.info("worker_online", { worker_id: runtime.workerId });
   }
 
   async initializePairingMode(config) {
     // Initialize Base44 client with minimal config (no secret yet)
-    // We'll need the base44ApiUrl from somewhere - for now use config if available
+    this.runtimeConfig = this.configManager.buildRuntimeConfig({
+      base44ApiBaseUrl: config.base44ApiUrl,
+    });
     if (config.base44ApiUrl) {
-      this.base44Client = new Base44Client(config, this.logger);
+      this.base44Client = new Base44Client(this.runtimeConfig, this.logger);
     }
 
     // Initialize pairing manager
-    this.pairingManager = new PairingManager(this.base44Client, this.logger);
+    this.pairingManager = new PairingManager(this.base44Client, this.logger, this.runtimeConfig);
 
     this.logger.info("pairing_mode_entered");
   }
@@ -224,9 +234,10 @@ class AppController {
     this.logger.info("app_shutdown_complete");
   }
 
-  // Getters for IPC handlers
+  // Getters for IPC handlers. Only the persisted, non-secret configuration is
+  // exposed to the renderer.
   getConfig() {
-    return this.configManager.config;
+    return { ...(this.configManager.config || this.configManager.loadConfig()) };
   }
 
   getWorkerStatus() {
@@ -258,7 +269,9 @@ class AppController {
   }
 
   updateConfig(updates) {
-    this.configManager.updateConfig(updates);
+    const config = this.configManager.updateConfig(updates);
+    if (this.logger) this.logger.setLevel(config.logLevel);
+    return config;
   }
 
   async forgetCredentials() {
