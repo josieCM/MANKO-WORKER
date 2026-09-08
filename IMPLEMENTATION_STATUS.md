@@ -87,14 +87,14 @@ commits for the individual Phase 1 items.
 | security / HMAC | COMPLETE (verified) | `signBody`/`verifyBody` base64url unpadded, constant-time compare, 4xx not retried, logger redacts secret-like keys. `npm run verify` passes |
 | logging | COMPLETE | Daily file + console, key redaction. `logLevel` from config is not honored (all levels always written) |
 | Windows packaging | NOT STARTED | electron-builder config exists (nsis, x64) but has never been run. `build/icon.ico` referenced by `build`, `nsis`, and the BrowserWindow is **absent from the repo** (only `build/.gitkeep`). `extraResources` expects `node_modules/playwright-core/.local-browsers/chromium-*/chrome-win`, and nothing installs that browser (no postinstall) |
-| tests | NOT STARTED | `npm test` → "No tests found". Only `scripts/verify-signing.js` and two throwaway Electron smoke files (`test-electron.js`, `test-simple.js`) at the repo root |
+| tests | PARTIAL | `tests/credentialStore.test.js` (18 Jest tests, keytar mocked) covers Phase 2 only. No tests for any other component. `scripts/verify-signing.js` plus two throwaway Electron smoke files (`test-electron.js`, `test-simple.js`) at the repo root |
 
 ## 5. Phase status
 
 | Phase | Status | Notes |
 | --- | --- | --- |
 | 1 — Foundation | COMPLETE | Repo unpacked, deps install, `npm run verify` passes, `npm start` opens the pairing window |
-| 2 — Credential Storage | PARTIAL | keytar wrapper written; never exercised, no Windows verification |
+| 2 — Credential Storage | COMPLETE (behavior verified against mocked keytar; Windows Credential Manager persistence still requires Windows verification) | See §5a |
 | 3 — Configuration Refactor | PARTIAL | AppData config manager exists; hardcoded path, dead legacy `.env` config, unhonored settings |
 | 4 — Pairing | PARTIAL | UI/flow scaffolded; Base44 contract unknown, null-client bug, request-code path missing |
 | 5 — Command Registry | COMPLETE (code) | Registry + validators + dispatch; runtime unverified |
@@ -105,17 +105,46 @@ commits for the individual Phase 1 items.
 | 10 — Error Recovery | PARTIAL | Browser crash recovery implemented; control-plane offline behavior thin |
 | 11 — Security Hardening | PARTIAL | HMAC verified; no rate limiting, no request-timestamp/replay window, idempotency cache is memory-only |
 | 12 — Windows Packaging | NOT STARTED | Never built; icon and bundled Chromium missing |
-| 13 — Testing | NOT STARTED | No test suite |
+| 13 — Testing | PARTIAL | Jest suite exists but covers Phase 2 credential storage only |
 | 14 — Documentation | PARTIAL | README describes the legacy POC (`npm start` as a Node worker, `.env` config), not the current Electron app |
 | 15 — Release | NOT STARTED | — |
+
+### 5a. Phase 2 — Credential Storage (implemented)
+
+Production backend is unchanged: Windows Credential Manager → keytar → `CredentialStore`.
+No plaintext or Linux fallback was added.
+
+- Naming is centralized in `src/main/credentialStore.js`: one exported `SERVICE_NAME`
+  (`"MANKO Worker"`) and `accountForWorker(workerId)`. The account name is the worker id,
+  so re-pairing the same worker overwrites its record via `setPassword` instead of
+  creating a duplicate; pairing under a new worker id removes the stale account.
+- Stored record (single JSON value per account): `worker_shared_secret`,
+  `base44_api_url`, `paired_at`. `worker_id` is the account name.
+- API: `storeCredentials`, `getCredentials`, `hasCredentials`, `getPairedWorkerId`,
+  `deleteCredentials`, `clearAllCredentials`, `checkBackend`, `isBackendAvailable`,
+  `getBackendError`. Pre-existing method names and signatures are unchanged
+  (`storeCredentials` gained an optional trailing `opts`).
+- Missing records return `null`/`false`; backend failures mark the store unavailable and
+  return safe values rather than throwing, except `storeCredentials`, which throws an
+  error tagged `CREDENTIAL_BACKEND_UNAVAILABLE`.
+- Secrets never reach logs or error messages: keytar errors are scrubbed of known secret
+  values before logging, and a corrupt stored record is reported by name, never echoed.
+- Configuration boundary: the credential store is now the source of truth for the pairing
+  identity. `appController` resolves the paired worker id from it, and pairing no longer
+  mirrors `workerId` / `base44ApiUrl` / `pairedAt` into `config.json`. Non-secret runtime
+  settings stay in `configManager` (the wider Phase 3 refactor was not done).
+- Security boundary unchanged: this store holds only MANKO Worker control-plane pairing
+  secrets — never target-site passwords, cookies, or browser tokens.
 
 ## 6. Known limitations and blockers
 
 Environment (Linux audit box — document, do not "fix" by changing architecture):
 
-- keytar cannot reach a secret service; `hasCredentials()` always logs a failure and
-  returns `false`, so the app always boots into pairing mode here. Credential storage
-  can only be verified on Windows.
+- keytar cannot reach a secret service (`Unknown or unsupported transport "disabled"`);
+  the store records the backend as unavailable, logs `credential_backend_unavailable`,
+  and reports unpaired, so the app boots into pairing mode here without crashing.
+  **Actual Windows Credential Manager persistence has NOT been verified end to end and
+  requires a Windows run.** Phase 2 behavior was verified against mocked keytar only.
 - Windows Credential Manager, `.ico` tray/window icons, and the NSIS installer target
   are all Windows-only and cannot be validated on this machine.
 - The tray is skipped on every platform right now because the icon file is absent.
@@ -136,22 +165,39 @@ npm ls --depth=0               # electron 29.4.6, playwright 1.62.1, keytar 7.9.
 npm run verify                 # PASS: signing round-trip, tamper rejection, WebCrypto parity
 node -e "require('src/main/sessionManager.js'); require('src/main/commandHandler.js')"  # modules load
 DISPLAY=:0 npm start           # Electron boots, pairing window renders, tray skipped
-npm test                       # FAIL: "No tests found"
 ```
+
+Phase 2:
+
+```
+npx jest tests/credentialStore.test.js   # PASS: 18/18
+npm test                                 # PASS: 1 suite, 18 tests
+npm run verify                           # PASS
+DISPLAY=:0 npm start                     # boots to pairing mode; logs
+                                         # credential_backend_unavailable, no crash
+```
+
+Test coverage: save, get, exists/isPaired, clear (single and all), missing and corrupt
+records, repeated save/update and stale-account cleanup, backend-error handling for every
+operation, and absence of secret leakage in logs, thrown errors, and stored backend state.
 
 Not exercised: pairing round trip, command endpoint, heartbeat delivery, browser
 launch, crash recovery, installer build.
 
 ## 8. Checkpoint
 
-- **CURRENT CHECKPOINT:** Phase 1 (Foundation) COMPLETE and verified. Phases 2–11 exist
-  as unverified scaffolding of varying depth; Phases 12–13 and 15 not started.
-- **NEXT AUTHORIZED PHASE:** Phase 2 — Credential Storage.
+- **CURRENT CHECKPOINT:** Phase 2 (Credential Storage) COMPLETE, verified against mocked
+  keytar; Windows Credential Manager persistence still requires verification on Windows.
+  Phase 1 (Foundation) COMPLETE and verified. Phases 3–11 exist as unverified scaffolding
+  of varying depth; Phases 12 and 15 not started, 13 partial (Phase 2 tests only).
+- **NEXT AUTHORIZED PHASE:** Phase 3 — Configuration Refactor.
 
 ## 9. Rules for future sessions
 
 - Phase 1 is done. Do **not** re-unpack the ZIP, re-create `.gitignore`/`.env.example`,
   or redo the Electron bootstrap.
+- Phase 2 is done. Do **not** rewrite `credentialStore.js`, add a second credential
+  store, or introduce a non-keytar backend.
 - Do not refactor working code for style. Do not start a later phase before the
   current one is authorized.
 - The target runtime is Windows Electron. Do not replace Windows-specific

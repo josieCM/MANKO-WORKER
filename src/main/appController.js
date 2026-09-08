@@ -27,6 +27,7 @@ class AppController {
     this.trayManager = null;
     this.mainWindow = null;
     this.isPaired = false;
+    this.workerId = null;
     this.workerStatus = "PAIRING";
   }
 
@@ -36,11 +37,18 @@ class AppController {
     
     // Initialize logger
     this.logger = new Logger(this.configManager.getLogsPath());
+    this.credentialStore.logger = this.logger;
     this.logger.info("app_initializing", { version: config.version });
 
     // Check pairing status
-    this.isPaired = await this.credentialStore.hasCredentials();
+    this.workerId = await this.credentialStore.getPairedWorkerId();
+    this.isPaired = this.workerId !== null;
     this.workerStatus = this.isPaired ? "ONLINE" : "PAIRING";
+    if (!this.isPaired && this.credentialStore.isBackendAvailable() === false) {
+      this.logger.warn("credential_backend_unavailable", {
+        error: this.credentialStore.getBackendError(),
+      });
+    }
 
     if (this.isPaired) {
       await this.initializeOnlineWorker(config);
@@ -59,13 +67,15 @@ class AppController {
   }
 
   async initializeOnlineWorker(config) {
-    // Load credentials
-    const credentials = await this.credentialStore.getCredentials(config.workerId);
+    // Load credentials (the credential store is the source of truth for the
+    // pairing identity; config.json holds non-secret runtime settings only)
+    const credentials = await this.credentialStore.getCredentials(this.workerId);
     if (!credentials) {
       throw new Error("Credentials not found despite paired status");
     }
 
     // Update config with credential data
+    config.workerId = credentials.worker_id;
     config.workerSharedSecret = credentials.worker_shared_secret;
     config.base44ApiBaseUrl = credentials.base44_api_url;
 
@@ -165,12 +175,8 @@ class AppController {
             credentials.base44_api_url
           );
 
-          // Update config
-          this.configManager.set("workerId", credentials.worker_id);
-          this.configManager.set("base44ApiUrl", credentials.base44_api_url);
-          this.configManager.set("pairedAt", new Date().toISOString());
-
           // Transition to online mode
+          this.workerId = credentials.worker_id;
           this.isPaired = true;
           this.workerStatus = "ONLINE";
           
@@ -227,7 +233,7 @@ class AppController {
     return {
       status: this.workerStatus,
       paired: this.isPaired,
-      worker_id: this.configManager.get("workerId"),
+      worker_id: this.workerId,
     };
   }
 
@@ -256,15 +262,12 @@ class AppController {
   }
 
   async forgetCredentials() {
-    const workerId = this.configManager.get("workerId");
-    if (workerId) {
-      await this.credentialStore.deleteCredentials(workerId);
+    if (this.workerId) {
+      await this.credentialStore.deleteCredentials(this.workerId);
+    } else {
+      await this.credentialStore.clearAllCredentials();
     }
-    this.configManager.updateConfig({
-      workerId: null,
-      base44ApiUrl: null,
-      pairedAt: null,
-    });
+    this.workerId = null;
     this.isPaired = false;
     this.workerStatus = "PAIRING";
     this.showPairingView();
