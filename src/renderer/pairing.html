@@ -1,0 +1,56 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>MANKO Worker - Pairing</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <div class="container">
+    <div class="header">
+      <h1>MANKO Worker</h1>
+      <p class="subtitle">Browser Session Infrastructure</p>
+    </div>
+
+    <div class="card pairing-card">
+      <div class="status-indicator" id="pairingStatus">
+        <span class="status-dot"></span>
+        <span class="status-text">Not Paired</span>
+      </div>
+
+      <div class="pairing-content">
+        <h2>Pair Your Worker</h2>
+        <p>Enter the pairing code from the MANKO control plane to connect this worker.</p>
+
+        <form id="pairingForm">
+          <div class="form-group">
+            <label for="pairingCode">Pairing Code</label>
+            <input 
+              type="text" 
+              id="pairingCode" 
+              placeholder="Enter 6-digit code" 
+              maxlength="6"
+              pattern="[0-9]{6}"
+              required
+              autocomplete="off"
+            >
+          </div>
+
+          <button type="submit" id="pairButton" class="btn btn-primary">
+            Pair Worker
+          </button>
+        </form>
+
+        <div id="pairingMessage" class="message"></div>
+      </div>
+    </div>
+
+    <div class="footer">
+      <p>MANKO Worker v1.0.0 Alpha</p>
+    </div>
+  </div>
+
+  <script src="pairing.js"></script>
+</body>
+</html>

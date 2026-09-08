@@ -1,0 +1,85 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>MANKO Worker</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <div class="container">
+    <div class="header">
+      <h1>MANKO Worker</h1>
+      <div class="worker-status" id="workerStatus">
+        <span class="status-dot"></span>
+        <span class="status-text">Loading...</span>
+      </div>
+    </div>
+
+    <div class="main-content">
+      <div class="card sessions-card">
+        <div class="card-header">
+          <h2>Sessions</h2>
+          <button id="refreshButton" class="btn btn-small">Refresh</button>
+        </div>
+        <div class="sessions-list" id="sessionsList">
+          <div class="empty-state">
+            <p>No sessions assigned</p>
+            <p class="subtext">Sessions will be assigned by the MANKO control plane</p>
+          </div>
+        </div>
+      </div>
+
+      <div class="card settings-card">
+        <div class="card-header">
+          <h2>Settings</h2>
+        </div>
+        <div class="settings-content">
+          <div class="setting-item">
+            <label>
+              <input type="checkbox" id="autoStart">
+              Start with Windows
+            </label>
+          </div>
+          <div class="setting-item">
+            <label>
+              <input type="checkbox" id="minimizeToTray">
+              Minimize to tray
+            </label>
+          </div>
+          <div class="setting-item">
+            <label for="logLevel">Log Level</label>
+            <select id="logLevel">
+              <option value="error">Error</option>
+              <option value="warn">Warning</option>
+              <option value="info">Info</option>
+              <option value="debug">Debug</option>
+            </select>
+          </div>
+          <div class="setting-item">
+            <label for="maxSessions">Maximum Sessions</label>
+            <input type="number" id="maxSessions" min="1" max="10" value="1">
+          </div>
+          <button id="saveSettings" class="btn btn-primary">Save Settings</button>
+        </div>
+      </div>
+
+      <div class="card actions-card">
+        <div class="card-header">
+          <h2>Actions</h2>
+        </div>
+        <div class="actions-content">
+          <button id="forgetCredentials" class="btn btn-danger">Forget Credentials</button>
+          <button id="quitButton" class="btn btn-secondary">Quit</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="footer">
+      <p>MANKO Worker v1.0.0 Alpha | Worker ID: <span id="workerId">-</span></p>
+    </div>
+  </div>
+
+  <script src="main.js"></script>
+</body>
+</html>

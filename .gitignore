@@ -1,0 +1,16 @@
+node_modules/
+dist/
+build/*
+!build/.gitkeep
+
+.env
+.env.local
+
+sessions/*
+!sessions/README.txt
+worker-logs/*
+!worker-logs/README.txt
+
+npm-debug.log*
+yarn-error.log*
+.DS_Store
